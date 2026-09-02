@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Armchair, BookOpen, Clock, Loader2, MapPin, RefreshCw, Search } from 'lucide-react';
 
 import type { LatLon } from '@/lib/geo';
-import { SEOUL, haversineKm } from '@/lib/geo';
+import { SEOUL, haversineKm, nearest } from '@/lib/geo';
 import {
   openStatus,
   type Library,
@@ -23,7 +23,7 @@ import type { LibrariesResponse, SeatsResponse } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { LibraryCard } from '@/components/library-card';
 import { LibraryDetail } from '@/components/library-detail';
-import { LibrariesMap, type MapPoint } from '@/components/libraries-map';
+import { LibrariesMap, type FlyTarget, type MapPoint, type Viewport } from '@/components/libraries-map';
 import { CommandPalette } from '@/components/command-palette';
 import { seatTone } from '@/lib/seat-status';
 
@@ -56,6 +56,12 @@ export function LibrariesBrowser() {
   const [filters, setFilters] = useState<LibFilters>(EMPTY_LIB_FILTERS);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // 지도가 보이는 영역. 목록은 이 bounds 로 거르고 center 기준으로 정렬한다(이동마다 서버 호출 없음).
+  const [viewport, setViewport] = useState<Viewport | null>(null);
+  // 사용자가 지도를 한 번이라도 직접 움직였는가(헤더 문구·거리 표시 판단). 한 번 true 면 유지.
+  const [mapInteracted, setMapInteracted] = useState(false);
+  // "가장 가까운 도서관 보기" 등으로 지도를 이동시키는 명령.
+  const [flyTo, setFlyTo] = useState<FlyTarget | null>(null);
   // 좌석 재계산·'지금 여는가'를 시간에 따라 갱신하기 위한 tick(자동 갱신마다 올린다).
   const [, setTick] = useState(0);
   const paletteOpenRef = useRef(paletteOpen);
@@ -141,35 +147,71 @@ export function LibrariesBrowser() {
   const seatMap: Record<string, LibrarySeats> = seatState.kind === 'ready' ? seatState.data.seats : {};
   const seatMeta = seatState.kind === 'ready' ? seatState.data.meta : null;
 
-  /* 병합: 도서관 + 좌석 + 거리 + '지금 여는가'. 거리순 정렬. */
+  /* 정렬·거리의 기준점: 지도를 움직였으면 지도 중심, 아니면 내 위치(또는 서울 폴백). */
+  const reference: LatLon = viewport
+    ? { lat: viewport.centerLat, lon: viewport.centerLon }
+    : origin;
+
+  /* 병합: 도서관 + 좌석 + 기준점까지의 거리 + '지금 여는가'. 기준점 기준 거리순 정렬. */
   const merged = useMemo(() => {
     const rows = libraries.map((lib) => {
       const seats = seatMap[lib.id] ?? null;
-      const distanceKm = Math.round(haversineKm(origin, { lat: lib.lat, lon: lib.lon }) * 10) / 10;
-      const status = openStatus(lib);
+      const distanceKm = Math.round(haversineKm(reference, { lat: lib.lat, lon: lib.lon }) * 10) / 10;
       const row: { lib: LibraryWithSeats; status: OpenStatus } = {
         lib: { ...lib, distanceKm, seats },
-        status,
+        status: openStatus(lib),
       };
       return row;
     });
     rows.sort((a, b) => a.lib.distanceKm - b.lib.distanceKm);
     return rows;
-    // seatState/geo 가 바뀌면 재계산. tick 은 시간 경과 반영.
+    // seatState/기준점이 바뀌면 재계산. tick 은 시간 경과 반영.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [libraries, seatState, origin.lat, origin.lon]);
+  }, [libraries, seatState, reference.lat, reference.lon]);
 
-  const filtered = useMemo(
+  /* 필터(패싯) 통과분 — 지도 핀과 "가장 가까운 곳" 탐색의 모집단. bounds 로는 아직 안 자른다. */
+  const facetFiltered = useMemo(
     () => merged.filter((r) => matchesLibFilter(r.lib, r.status, filters)),
     [merged, filters],
   );
 
+  /* 목록 = 필터 통과분 중 '지금 보이는 영역(bounds)' 안. viewport 가 아직 없으면 전체(초기 순간). */
+  const inView = useMemo(() => {
+    if (!viewport) return facetFiltered;
+    return facetFiltered.filter(
+      (r) =>
+        r.lib.lon >= viewport.west &&
+        r.lib.lon <= viewport.east &&
+        r.lib.lat >= viewport.south &&
+        r.lib.lat <= viewport.north,
+    );
+  }, [facetFiltered, viewport]);
+
+  /* 핀은 필터 통과분 전체를 그린다(지도를 옮기면 이미 그려진 핀이 화면에 들어온다). */
   const points: MapPoint[] = useMemo(
-    () => filtered.map((r) => ({ id: r.lib.id, lon: r.lib.lon, lat: r.lib.lat, title: r.lib.name, tone: seatTone(r.lib.seats) })),
-    [filtered],
+    () => facetFiltered.map((r) => ({ id: r.lib.id, lon: r.lib.lon, lat: r.lib.lat, title: r.lib.name, tone: seatTone(r.lib.seats) })),
+    [facetFiltered],
   );
 
   const selected = merged.find((r) => r.lib.id === selectedId) ?? null;
+
+  /* 지도 이동/줌 종료(디바운스됨) → 보이는 영역 갱신. 사용자가 직접 움직였으면 상호작용 플래그를 켠다. */
+  const onViewport = useCallback((v: Viewport) => {
+    setViewport(v);
+    if (v.interacted) setMapInteracted(true);
+  }, []);
+
+  /* 현재 기준점에서 가장 가까운(필터 통과) 도서관으로 지도를 이동 — 빈 영역일 때 탈출구. */
+  const flyToNearest = useCallback(() => {
+    const near = nearest(
+      facetFiltered.map((r) => ({ lat: r.lib.lat, lon: r.lib.lon })),
+      reference,
+      1,
+    );
+    if (near.length > 0) setFlyTo({ lat: near[0].item.lat, lon: near[0].item.lon, nonce: Date.now() });
+    // reference 는 매 렌더 새 객체라 원시값(lat/lon)으로 의존한다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [facetFiltered, reference.lat, reference.lon]);
 
   /* ⌘K 토글. */
   useEffect(() => {
@@ -203,6 +245,11 @@ export function LibrariesBrowser() {
 
   const regions = libMeta?.byRegion ?? [];
   const providing = seatMeta?.providing ?? null;
+  // 거리를 표시할지: 내 실제 위치가 있거나, 사용자가 지도를 직접 움직였을 때(그 중심이 기준).
+  const showDistance = hasRealLocation || mapInteracted;
+  // 목록이 비었는데(bounds 안 0곳) 필터 통과분은 다른 지역에 있는가 → "가장 가까운 곳 보기" 탈출구.
+  const emptyButExistsElsewhere =
+    libState.kind === 'ready' && inView.length === 0 && facetFiltered.length > 0;
 
   return (
     <div className="flex h-dvh flex-col">
@@ -308,6 +355,8 @@ export function LibrariesBrowser() {
               isUserLocation={hasRealLocation}
               selectedId={selectedId}
               onSelect={setSelectedId}
+              onViewport={onViewport}
+              flyTo={flyTo}
             />
           )}
           {libState.kind === 'loading' && (
@@ -334,10 +383,13 @@ export function LibrariesBrowser() {
         {/* 리스트 */}
         <div className="flex min-h-0 flex-1 flex-col sm:w-[26rem] sm:flex-none sm:border-r sm:border-border">
           <div className="flex items-baseline justify-between px-4 py-2 text-xs text-muted-foreground">
-            <span className="font-medium text-foreground">주변 도서관</span>
+            <span className="font-medium text-foreground">
+              {mapInteracted ? '이 지도 영역' : '주변 도서관'}
+            </span>
             {libState.kind === 'ready' && (
               <span>
-                {filtered.length}곳{hasRealLocation ? ' · 가까운 순' : ' · 서울 기준'}
+                {inView.length}곳
+                {mapInteracted ? ' · 지도 중심 순' : hasRealLocation ? ' · 가까운 순' : ' · 서울 기준'}
               </span>
             )}
           </div>
@@ -367,25 +419,43 @@ export function LibrariesBrowser() {
           )}
 
           <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 pb-4">
-            {libState.kind === 'ready' && filtered.length === 0 && (
+            {libState.kind === 'ready' && inView.length === 0 && (
               <div className="flex flex-col items-center gap-2 py-12 text-center">
                 <BookOpen className="size-8 text-muted-foreground/50" />
-                <p className="text-sm font-medium">
-                  {hasAnyLibFilter(filters) ? '이 조건에 맞는 도서관이 없습니다.' : '도서관이 없습니다.'}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {hasAnyLibFilter(filters)
-                    ? '필터를 줄이거나 초기화해 보세요. 실시간 좌석은 수도권 위주입니다.'
-                    : '잠시 후 다시 시도해 보세요.'}
-                </p>
+                {emptyButExistsElsewhere ? (
+                  <>
+                    <p className="text-sm font-medium">이 지도 영역에는 도서관이 없습니다.</p>
+                    <p className="text-xs text-muted-foreground">
+                      실시간 좌석 제공 도서관은 경기·서울 등 수도권에 몰려 있습니다.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={flyToNearest}
+                      className="mt-1 rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+                    >
+                      가장 가까운 도서관 보기
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm font-medium">
+                      {hasAnyLibFilter(filters) ? '이 조건에 맞는 도서관이 없습니다.' : '도서관이 없습니다.'}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {hasAnyLibFilter(filters)
+                        ? '필터를 줄이거나 초기화해 보세요. 실시간 좌석은 수도권 위주입니다.'
+                        : '잠시 후 다시 시도해 보세요.'}
+                    </p>
+                  </>
+                )}
               </div>
             )}
-            {filtered.map((r) => (
+            {inView.map((r) => (
               <LibraryCard
                 key={r.lib.id}
                 lib={r.lib}
                 status={r.status}
-                usedFallback={!hasRealLocation}
+                usedFallback={!showDistance}
                 selected={r.lib.id === selectedId}
                 onSelect={() => setSelectedId(r.lib.id)}
               />
@@ -412,7 +482,7 @@ export function LibrariesBrowser() {
           <LibraryDetail
             lib={selected.lib}
             status={selected.status}
-            usedFallback={!hasRealLocation}
+            usedFallback={!showDistance}
             onClose={() => setSelectedId(null)}
           />
         </div>

@@ -26,6 +26,25 @@ export interface MapPoint {
   tone: SeatTone;
 }
 
+/** 지도의 현재 보이는 영역. 목록을 이 bounds 로 거르고, center 기준으로 정렬한다. */
+export interface Viewport {
+  west: number;
+  south: number;
+  east: number;
+  north: number;
+  centerLat: number;
+  centerLon: number;
+  /** 사용자가 직접 움직였는가(프로그램 이동은 false). 헤더 문구·거리 표시 판단용. */
+  interacted: boolean;
+}
+
+/** 지도를 특정 좌표로 이동시키는 명령. nonce 로 같은 좌표 재이동도 트리거. */
+export interface FlyTarget {
+  lat: number;
+  lon: number;
+  nonce: number;
+}
+
 const BASEMAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 const KOREA_BOUNDS: [[number, number], [number, number]] = [
   [125.9, 33.1],
@@ -62,22 +81,33 @@ export function LibrariesMap({
   isUserLocation,
   selectedId,
   onSelect,
+  onViewport,
+  flyTo,
 }: {
   points: MapPoint[];
   center: LatLon;
   isUserLocation: boolean;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  /** 지도 이동/줌이 끝날 때(디바운스) 현재 보이는 영역을 알린다. 목록은 이걸로 필터·정렬한다. */
+  onViewport?: (v: Viewport) => void;
+  /** 이 좌표로 지도를 이동(예: "가장 가까운 도서관 보기"). nonce 가 바뀌면 재이동. */
+  flyTo?: FlyTarget | null;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const loadedRef = useRef(false);
   const fittedRef = useRef(false);
   const onSelectRef = useRef(onSelect);
+  const onViewportRef = useRef(onViewport);
   const pointsRef = useRef(points);
   const centerRef = useRef(center);
+  // moveend 디바운스 타이머 + 그 사이 사용자 조작 여부 누적.
+  const emitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingInteractedRef = useRef(false);
 
   useEffect(() => void (onSelectRef.current = onSelect), [onSelect]);
+  useEffect(() => void (onViewportRef.current = onViewport), [onViewport]);
   useEffect(() => void (pointsRef.current = points), [points]);
   useEffect(() => void (centerRef.current = center), [center]);
 
@@ -159,6 +189,29 @@ export function LibrariesMap({
       map.on('mouseleave', layer, () => void (map.getCanvas().style.cursor = ''));
     }
 
+    // 보이는 영역 알림: moveend 를 250ms 디바운스(드래그 중 재계산 방지). 사용자 조작 여부는
+    // originalEvent 유무로 구분(프로그램 이동=easeTo 는 originalEvent 없음). 이동마다 서버를
+    // 때리지 않는다 — 목록·핀은 이미 클라이언트에 있는 전량(168곳)을 이 bounds 로 거를 뿐이다.
+    const emitViewport = () => {
+      const b = map.getBounds();
+      const c = map.getCenter();
+      onViewportRef.current?.({
+        west: b.getWest(),
+        south: b.getSouth(),
+        east: b.getEast(),
+        north: b.getNorth(),
+        centerLat: c.lat,
+        centerLon: c.lng,
+        interacted: pendingInteractedRef.current,
+      });
+      pendingInteractedRef.current = false;
+    };
+    map.on('moveend', (e) => {
+      if ((e as { originalEvent?: unknown }).originalEvent) pendingInteractedRef.current = true;
+      if (emitTimerRef.current) clearTimeout(emitTimerRef.current);
+      emitTimerRef.current = setTimeout(emitViewport, 250);
+    });
+
     // 0x0 으로 생성되면 줌이 굳는다. 실제 크기를 얻은 뒤 한 번 더 맞춘다.
     const observer = new ResizeObserver((entries) => {
       const box = entries[0]?.contentRect;
@@ -173,12 +226,21 @@ export function LibrariesMap({
 
     return () => {
       observer.disconnect();
+      if (emitTimerRef.current) clearTimeout(emitTimerRef.current);
       map.remove();
       mapRef.current = null;
       loadedRef.current = false;
       fittedRef.current = false;
     };
   }, []);
+
+  /* flyTo 명령: 부모가 "가장 가까운 도서관 보기" 등으로 좌표를 주면 그리로 이동한다.
+     이동이 끝나면 moveend 가 emitViewport 를 호출해 목록이 새 영역으로 따라온다. */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !flyTo) return;
+    map.easeTo({ center: [flyTo.lon, flyTo.lat], zoom: Math.max(map.getZoom(), 12), duration: 600 });
+  }, [flyTo]);
 
   /* 포인트 갱신(좌석 색 포함). */
   useEffect(() => {
