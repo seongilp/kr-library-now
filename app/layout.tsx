@@ -22,6 +22,8 @@ export const metadata: Metadata = {
   description:
     '공공도서관 열람실의 실시간 잔여좌석을 지도에서. 내 주변 도서관의 지금 빈자리·운영시간·휴관 여부를 한눈에. 행정안전부 공공도서관 열람실 실시간 공식 데이터(수도권 위주).',
   keywords: ['도서관', '열람실', '실시간 좌석', '도서관 자리', '공부할 곳', '스터디카페 대안', '공공도서관'],
+  applicationName: '도서관나우',
+  appleWebApp: { title: '도서관나우' },
   alternates: { canonical: SITE },
   openGraph: {
     title: '도서관나우 — 지금 자리 있는 도서관',
