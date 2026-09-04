@@ -4,6 +4,8 @@ import maplibregl, { type Map as MapLibreMap } from 'maplibre-gl';
 import { useEffect, useRef } from 'react';
 
 import type { LatLon } from '@/lib/geo';
+import type { OpenStatus } from '@/lib/libraries';
+import { isEstimatedOpenPin, pinColor } from '@/lib/pin-color';
 import type { SeatTone } from '@/lib/seat-status';
 
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -12,10 +14,12 @@ import 'maplibre-gl/dist/maplibre-gl.css';
  * 도서관 지도. MapLibre **v5** — v6 는 Turbopack 에서 워커 로딩이 실패해 지도가 조용히 안 뜬다
  * (메모리 기록). 좌표는 WGS84(lon,lat)를 info_v2 가 직접 준다.
  *
- * ★ 핀 색이 곧 이 앱의 값이다: 좌석 여유 상태(seatTone)를 색으로 구분한다. 캠핑앱은 색을 하나로
- *   통일했지만(위치만이 관심), 여기선 "어디가 지금 자리 있나"가 지도의 질문이라 색이 정보다.
+ * ★ 핀 색이 곧 이 앱의 값이다. 좌석 tone 이 있으면 그걸 우선(여유/혼잡/만석), 없으면(실시간
+ *   미제공 도서관이 다수 — 수도권 123곳만 실시간) 운영시간 기준 OpenStatus 로 "열림/닫힘"을
+ *   가른다(pinColor, lib/pin-color.ts). 예전엔 미제공=회색 하나였는데 그게 지도 대부분을
+ *   회색으로 덮어 "닫혀 있다"로 오독됐다(팀 지시로 수정) — 이제 회색은 진짜 "닫힘·정보 없음"만.
+ *   좌석 실측 초록과 운영시간 추정 초록은 색은 같고 테두리로만 구분한다(색 종류를 안 늘림).
  *   범례를 반드시 함께 둔다(색만 있고 범례 없으면 오히려 헷갈린다).
- *     초록=여유 · 주황=혼잡 · 빨강=만석 · 회색=실시간 미제공/갱신 안 됨
  */
 
 export interface MapPoint {
@@ -24,6 +28,7 @@ export interface MapPoint {
   lat: number;
   title: string;
   tone: SeatTone;
+  status: OpenStatus;
 }
 
 /** 지도의 현재 보이는 영역. 목록을 이 bounds 로 거르고, center 기준으로 정렬한다. */
@@ -53,22 +58,19 @@ const KOREA_BOUNDS: [[number, number], [number, number]] = [
 const FIT_PADDING = { top: 40, right: 40, bottom: 40, left: 40 };
 const SOURCE = 'libraries';
 
-/** 좌석 상태 → 핀 색. seat-status 의 SeatTone 과 1:1. */
-const TONE_COLOR: Record<SeatTone, string> = {
-  free: '#22c55e', // 초록 · 여유
-  busy: '#f59e0b', // 주황 · 혼잡
-  full: '#ef4444', // 빨강 · 만석
-  stale: '#6b7280', // 회색 · 갱신 안 됨
-  none: '#64748b', // 회색(약간 다른 톤) · 실시간 미제공
-};
-
 function toGeoJson(points: MapPoint[]): GeoJSON.FeatureCollection {
   return {
     type: 'FeatureCollection',
     features: points.map((p) => ({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
-      properties: { id: p.id, title: p.title, color: TONE_COLOR[p.tone] },
+      properties: {
+        id: p.id,
+        title: p.title,
+        color: pinColor(p.tone, p.status),
+        // 좌석 실측 없이 운영시간만으로 "열림"을 추정한 핀 — 색은 같은 초록이라 테두리로만 구분.
+        estimated: isEstimatedOpenPin(p.tone, p.status),
+      },
     })),
   };
 }
@@ -152,8 +154,9 @@ export function LibrariesMap({
           'circle-radius': ['interpolate', ['linear'], ['zoom'], 6, 5, 15, 9],
           'circle-color': ['get', 'color'],
           'circle-opacity': 0.92,
-          'circle-stroke-color': '#0b0f19',
-          'circle-stroke-width': 1.5,
+          // 운영시간 추정 "열림"(좌석 실측 아님)은 얇은 밝은 테두리로만 구분 — 색은 늘리지 않는다.
+          'circle-stroke-color': ['case', ['get', 'estimated'], '#e5e7eb', '#0b0f19'],
+          'circle-stroke-width': ['case', ['get', 'estimated'], 1, 1.5],
         },
       });
       map.addLayer({
@@ -279,12 +282,14 @@ export function LibrariesMap({
   return (
     <div className="relative size-full">
       <div ref={containerRef} className="size-full" />
-      {/* 범례: 색이 정보이므로 반드시 둔다. */}
+      {/* 범례: 색이 정보이므로 반드시 둔다. 회색은 진짜 "닫힘·정보 없음"만 — 실시간 미제공이어도
+          운영시간상 열려 있으면 초록이다. */}
       <div className="pointer-events-none absolute bottom-2 left-2 flex flex-col gap-1 rounded-lg border border-border bg-card/90 px-2.5 py-2 text-[10px] text-muted-foreground backdrop-blur">
         <LegendDot color="#22c55e" label="여유" />
         <LegendDot color="#f59e0b" label="혼잡" />
         <LegendDot color="#ef4444" label="만석" />
-        <LegendDot color="#64748b" label="실시간 미제공" />
+        <LegendDot color="#22c55e" label="열림(운영시간 기준)" />
+        <LegendDot color="#64748b" label="닫힘·정보 없음" />
       </div>
     </div>
   );

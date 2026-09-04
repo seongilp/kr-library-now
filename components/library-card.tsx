@@ -63,6 +63,8 @@ export function LibraryCard({
         {/* 지금 여는가 */}
         <OpenBadge status={status} />
       </div>
+      {/* 운영시간 추정 고지 — 배지 아래 작은 한 줄(회색). */}
+      <p className="text-[10px] text-muted-foreground">운영시간표 기준 추정 · 휴관·임시휴관은 방문 전 확인</p>
     </button>
   );
 }

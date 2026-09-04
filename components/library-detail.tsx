@@ -140,6 +140,8 @@ export function LibraryDetail({
               </span>
             )}
           </div>
+          {/* 운영시간 추정 고지 — 휴관정보 유무와 무관하게 항상. */}
+          <p className="text-[11px] text-muted-foreground">운영시간표 기준 추정 · 휴관·임시휴관은 방문 전 확인</p>
           <HoursRow label="평일" span={lib.hours.weekday} />
           <HoursRow label="주말" span={lib.hours.weekend} />
           <HoursRow label="공휴일" span={lib.hours.holiday} />

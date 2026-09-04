@@ -189,7 +189,17 @@ export function LibrariesBrowser() {
 
   /* 핀은 필터 통과분 전체를 그린다(지도를 옮기면 이미 그려진 핀이 화면에 들어온다). */
   const points: MapPoint[] = useMemo(
-    () => facetFiltered.map((r) => ({ id: r.lib.id, lon: r.lib.lon, lat: r.lib.lat, title: r.lib.name, tone: seatTone(r.lib.seats) })),
+    () =>
+      facetFiltered.map((r) => ({
+        id: r.lib.id,
+        lon: r.lib.lon,
+        lat: r.lib.lat,
+        title: r.lib.name,
+        tone: seatTone(r.lib.seats),
+        // 지도 핀도 카드와 같은 status 값을 쓴다(따로 계산해 어긋나지 않게) — openStatus() 호출은
+        // 위 merged 계산에서 한 번만 한다.
+        status: r.status,
+      })),
     [facetFiltered],
   );
 
@@ -417,6 +427,10 @@ export function LibrariesBrowser() {
               실시간 좌석을 잠시 불러오지 못했습니다(운영시간·위치는 정상).
             </p>
           )}
+          {/* 지도 핀 색은 좌석이 없으면 운영시간 추정으로 "열림"을 표시한다 — 그 추정의 한계 고지. */}
+          <p className="px-4 pb-1 text-[11px] text-muted-foreground">
+            운영시간표 기준 추정 · 휴관·임시휴관은 방문 전 확인
+          </p>
 
           <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 pb-4">
             {libState.kind === 'ready' && inView.length === 0 && (
